@@ -28,7 +28,7 @@ fn ctx(plans: Vec<PlanRecord>) -> TaskContext {
 /// over another list, or an earlier turn's ref, counts on its own.
 #[test]
 fn coverage_counts_each_list_once() {
-    let list = |step| Some((Over::Step(step), None));
+    let list = |step| Some(format!("9:step {step}:"));
     let link = |step, from, looked_at, remaining| Link { name: String::new(), continues: None, list: list(step), from, looked_at, remaining };
     let chain = [link(1, 0, 30, 50), link(1, 30, 30, 20), link(1, 60, 20, 0)];
     assert_eq!(coverage(&chain), (80, 0));
@@ -51,7 +51,7 @@ fn a_question_that_stopped_part_way_gets_its_own_line() {
     let link = |n: u32, continues: Option<u32>, from, looked_at, remaining| Link {
         name: format!("sb:9:{n}"),
         continues: continues.map(|c| format!("sb:9:{c}")),
-        list: Some((Over::Step(1), None)),
+        list: Some("9:step 1:".into()),
         from,
         looked_at,
         remaining,
@@ -276,6 +276,7 @@ fn an_earlier_turn_s_fields_come_from_its_record_in_order() {
         from: 0,
         looked_at: None,
         remaining: 0,
+        list: None,
     };
     let turn = Turn {
         task_id: 5,
@@ -325,4 +326,32 @@ fn an_earlier_turns_link_counts_from_its_record() {
     assert_eq!(coverage(&chain[..1]), (30, 50), "the last link left out: the first's rest stands");
     let both = [earlier(2, None, 0, 30, 50), earlier(3, Some(2), 30, 30, 20), earlier(4, None, 0, 10, 5)];
     assert_eq!(stop_lines(&both), ["(sift sb:5:3 stopped after 60 of its 80 items)", "(sift sb:5:4 stopped after 10 of its 15 items)"]);
+}
+
+/// Issue 1058: two separate earlier sifts over one list, each 0..30 of 80,
+/// looked at 30 and left 50, not 60 and 100: their records' `list` key
+/// groups them like this run's sifts. A record without the key keeps
+/// today's count, its own list.
+#[test]
+fn two_earlier_sifts_over_one_list_count_it_once() {
+    let entry = |n: u32, list: Option<&str>| {
+        let mut e = serde_json::json!({"scrapbook": format!("sb:5:{n}"), "rows": 1, "looked_at": 30, "remaining": 50});
+        if let Some(l) = list {
+            e["list"] = serde_json::json!(l);
+        }
+        Link::of(format!("sb:5:{n}"), Some(&e), None, 1)
+    };
+    assert_eq!(entry(2, Some("5:step 1:hits")).list.as_deref(), Some("5:step 1:hits"));
+    assert_eq!(coverage(&[entry(2, Some("5:step 1:hits")), entry(3, Some("5:step 1:hits"))]), (30, 50));
+    assert_eq!(coverage(&[entry(2, Some("5:step 1:hits")), entry(3, Some("5:step 2:hits"))]), (60, 100), "two lists");
+    assert_eq!(coverage(&[entry(2, None), entry(3, None)]), (60, 100), "records stored without the key");
+}
+
+/// Issue 1058: this run's link keys its list from its parameters and its
+/// own task, so it groups with an earlier turn's record of the same list.
+#[test]
+fn this_runs_link_keys_its_list_from_its_parameters() {
+    let p = super::super::params::parse_params(&serde_json::json!({"over": {"step": 1}, "items": "hits", "keep_if": "x", "fields": ["a"]})).unwrap();
+    let link = Link::of("sb:5:6".into(), None, Some(p), 0);
+    assert_eq!(link.list.as_deref(), Some("5:step 1:hits"));
 }

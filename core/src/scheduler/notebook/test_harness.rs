@@ -79,6 +79,9 @@ pub(crate) struct Script {
     pub(crate) sort_delay: std::time::Duration,
     /// Cancel this task during the first sorter call (an operator's cancel).
     pub(crate) cancel_during_sort: Option<(sqlx::PgPool, i64)>,
+    /// Run this SQL (on its own pool) during the first sorter call: an
+    /// outage of just the tables it hides (issue 1053's failed cancel check).
+    pub(crate) sql_during_sort: Option<(sqlx::PgPool, &'static str)>,
     /// Cancel this task during model turn `n` (0-based): an operator's
     /// cancel while the model thinks.
     pub(crate) cancel_during_turn: Option<(sqlx::PgPool, i64, usize)>,
@@ -104,6 +107,7 @@ impl Script {
             sift_cfg: SiftConfig { max_reads: 64, read_methods: vec!["mail.read".into(), "esc.read".into()] },
             sort_delay: std::time::Duration::ZERO,
             cancel_during_sort: None,
+            sql_during_sort: None,
             cancel_during_turn: None,
             turn_delay: std::time::Duration::ZERO,
         }
@@ -185,6 +189,9 @@ impl Sorter for Script {
         let first = self.sorted.lock().unwrap().is_empty();
         if let (true, Some((pool, task))) = (first, &self.cancel_during_sort) {
             kastellan_db::tasks::mark_cancelled(pool, *task).await.unwrap();
+        }
+        if let (true, Some((pool, sql))) = (first, &self.sql_during_sort) {
+            sqlx::raw_sql(*sql).execute(pool).await.unwrap();
         }
         self.sorted.lock().unwrap().push(user_msg);
         self.sorter_replies.lock().unwrap().pop_front().ok_or_else(|| AgentError::PromptMissing("out of script".into()))

@@ -145,6 +145,8 @@ async fn the_sift_loop() {
     an_earlier_turns_table_counts_what_its_sifts_looked_at(&pool).await;
     a_sift_over_a_step_whose_newest_call_failed_says_so(&pool).await;
     a_sift_over_a_step_whose_newest_call_was_blocked_says_so(&pool).await;
+    an_error_dispatching_the_reads_writes_its_finished_row(&pool, &cluster.conn_spec).await;
+    a_failed_cancel_check_fails_the_task_with_its_error(&pool, &cluster.conn_spec).await;
 }
 
 async fn a_sift_reviews_its_reads_as_one_plan_and_keeps_true_positives(pool: &sqlx::PgPool) {

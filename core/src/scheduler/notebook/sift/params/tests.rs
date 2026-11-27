@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::*;
 
@@ -113,6 +113,7 @@ fn a_copied_continues_or_chain_is_ignored() {
     let mut v = spec_example();
     v["continues"] = json!("sb:9:2");
     v["chain"] = json!({"sifts": 2, "looked_at": 60, "kept": 9});
+    v["list"] = json!("5:step 1:hits");
     assert!(parse_params(&v).is_ok());
 }
 
@@ -131,4 +132,15 @@ fn read_takes_one_read_or_a_list_of_them() {
     assert!(with(json!([t("a"), t("b"), t("c"), t("d")])).unwrap_err().contains("not 4"));
     let bad = with(json!([t("a"), {"tool": "mail"}])).unwrap_err();
     assert!(bad.contains("`read` is not usable"), "{bad}");
+}
+
+/// Issue 1058: a list's key names its task for a step (step numbers are a
+/// task's own) and not for a scrapbook (its ref names one already). Pure.
+#[test]
+fn a_list_key_names_the_task_only_for_a_step() {
+    let p = |over: Value| parse_params(&json!({"over": over, "items": "hits", "keep_if": "x", "fields": ["a"]})).unwrap();
+    assert_eq!(p(json!({"step": 2})).list_key(7), "7:step 2:hits");
+    assert_eq!(p(json!({"scrapbook": "sb:301:1"})).list_key(7), "sb:301:1", "`items` is not read over a scrapbook");
+    let bare = parse_params(&json!({"over": {"step": 2}, "keep_if": "x", "fields": ["a"]})).unwrap();
+    assert_eq!(bare.list_key(7), "7:step 2:", "no `items`: the result itself");
 }

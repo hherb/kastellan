@@ -338,6 +338,7 @@ fn a_sift_leaves_its_scrapbook_and_its_reads_are_not_calls() {
             from: 0,
             looked_at: None,
             remaining: 0,
+            list: None,
         }]
     );
     assert_eq!(record.data_class, DataClass::Personal, "the reads still raise the class");
@@ -436,4 +437,27 @@ fn a_sift_records_the_span_of_its_list_it_looked_at() {
     assert!(shown[1].get("remaining").is_none(), "absent when 0: {shown}");
     let old: TurnScrapbook = serde_json::from_value(serde_json::json!({"scrapbook": "sb:7:2", "rows": 1})).unwrap();
     assert_eq!(old.looked_at, None, "a record stored before the counts still parses, and says it has none");
+}
+
+/// Issue 1058: two separate sifts over one list were counted as two lists
+/// by a later turn's table. The record keeps a code-written `list` key, the
+/// same for sifts over the same `over` and `items` of one task; absent when
+/// the sift's parameters do not parse.
+#[test]
+fn a_sift_records_which_list_it_went_over() {
+    use crate::scheduler::notebook::sift::{SIFT_METHOD, SIFT_TOOL};
+    let sift = |params, name: &str| {
+        let plan = plan_with(vec![step(SIFT_TOOL, SIFT_METHOD, params, DataClass::Personal)]);
+        PlanRecord::new(plan, vec![StepOutcome::Ok(serde_json::json!({"scrapbook": name, "kept": 1}))])
+    };
+    let over = |step: u32, keep_if: &str| serde_json::json!({"over": {"step": step}, "items": "hits", "keep_if": keep_if, "fields": ["a"]});
+    let plans = [sift(over(1, "an invoice"), "sb:7:2"), sift(over(1, "a receipt"), "sb:7:3"), sift(over(2, "x"), "sb:7:4"), sift(serde_json::json!({}), "sb:7:5")];
+    let shown = serde_json::to_value(from_plans(&plans, DataClass::Public).scrapbooks).unwrap();
+    assert_eq!(shown[0]["list"], "7:step 1:hits", "{shown}");
+    assert_eq!(shown[1]["list"], shown[0]["list"], "another criterion, the same list");
+    assert_eq!(shown[2]["list"], "7:step 2:hits");
+    assert!(shown[3].get("list").is_none(), "unparsed parameters: no key: {shown}");
+    let long = serde_json::json!({"over": {"step": 1}, "items": "é".repeat(400), "keep_if": "x", "fields": ["a"]});
+    let shown = serde_json::to_value(from_plans(&[sift(long, "sb:7:6")], DataClass::Public).scrapbooks).unwrap();
+    assert!(shown[0]["list"].as_str().unwrap().chars().count() <= RETURNS_MAX_CHARS + 1, "a long `items` is clamped: {shown}");
 }
